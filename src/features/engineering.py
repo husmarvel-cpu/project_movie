@@ -7,120 +7,99 @@ import re
 
 
 class FeatureEngineer:
+    """Создание признаков для фильмов."""
 
     def __init__(self):
         self.mlb_genres = MultiLabelBinarizer()
-        self.mlb_keywords = MultiLabelBinarizer()
-        self.tfidf_vectorizer = TfidfVectorizer(max_features=1000, stop_words='english')
         self.scaler = MinMaxScaler()
+        self.tfidf = TfidfVectorizer(max_features=500, stop_words='english')
 
     def create_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        features_df = df.copy()
+        df = df.copy()
 
-        features_df = self._create_financial_features(features_df)
+        # 1. Финансовые признаки
+        df = self._add_financial_features(df)
 
-        features_df = self._create_time_features(features_df)
+        # 2. Временные признаки
+        df = self._add_time_features(df)
 
-        features_df = self._encode_genres(features_df)
+        # 3. Жанры one-hot
+        df = self._add_genre_features(df)
 
-        features_df = self._create_text_features(features_df)
+        # 4. Признаки из текста (overview)
+        df = self._add_text_features(df)
 
-        features_df = self._create_popularity_features(features_df)
+        # 5. Популярность и рейтинг
+        df = self._add_popularity_features(df)
 
-        features_df = self._create_advanced_metrics(features_df)
-
-        return features_df
-
-    def _create_financial_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        df['profit'] = df['revenue'] - df['budget']
-        df['roi'] = np.where(df['budget'] > 0, df['profit'] / df['budget'], 0)
-        df['budget_to_revenue_ratio'] = np.where(df['revenue'] > 0, df['budget'] / df['revenue'], 0)
-        df['is_profitable'] = (df['profit'] > 0).astype(int)
-
-        financial_cols = ['budget', 'revenue', 'profit']
-        for col in financial_cols:
-            df[f'log_{col}'] = np.log1p(df[col])
+        # 6. Сложные метрики
+        df = self._add_advanced_features(df)
 
         return df
 
-    def _create_time_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        df['release_date'] = pd.to_datetime(df['release_date'], errors='coerce')
-        df['release_year'] = df['release_date'].dt.year
-        df['release_month'] = df['release_date'].dt.month
-        df['release_day_of_week'] = df['release_date'].dt.dayofweek
-        df['release_season'] = df['release_date'].dt.month % 12 // 3 + 1
-
-        # Возраст фильма
-        current_year = pd.Timestamp.now().year
-        df['movie_age'] = current_year - df['release_year']
-
+    def _add_financial_features(self, df):
+        if 'budget' in df.columns and 'revenue' in df.columns:
+            df['profit'] = df['revenue'] - df['budget']
+            df['roi'] = np.where(df['budget'] > 0, df['profit'] / df['budget'], 0)
+            df['log_budget'] = np.log1p(df['budget'])
+            df['log_revenue'] = np.log1p(df['revenue'])
         return df
 
-    def _encode_genres(self, df: pd.DataFrame) -> pd.DataFrame:
-        genres_matrix = self.mlb_genres.fit_transform(df['genres'])
-        genres_df = pd.DataFrame(
-            genres_matrix,
-            columns=[f"genre_{col}" for col in self.mlb_genres.classes_],
-            index=df.index
-        )
-
-        # Добавляем количество жанров
-        df['num_genres'] = df['genres'].apply(len)
-
-        return pd.concat([df, genres_df], axis=1)
-
-    def _create_text_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        overview_clean = df['overview'].fillna('').apply(self._clean_text)
-        tfidf_matrix = self.tfidf_vectorizer.fit_transform(overview_clean)
-
-        svd = TruncatedSVD(n_components=20, random_state=42)
-        tfidf_reduced = svd.fit_transform(tfidf_matrix)
-
-        for i in range(tfidf_reduced.shape[1]):
-            df[f'tfidf_component_{i}'] = tfidf_reduced[:, i]
-
-        df['overview_length'] = df['overview'].fillna('').apply(len)
-        df['title_length'] = df['title'].apply(len)
-
-        df['has_tagline'] = df['tagline'].notna().astype(int)
-
+    def _add_time_features(self, df):
+        if 'release_date' in df.columns:
+            df['release_year'] = df['release_date'].dt.year
+            df['release_month'] = df['release_date'].dt.month
+            df['release_dayofweek'] = df['release_date'].dt.dayofweek
+            df['release_season'] = df['release_month'] % 12 // 3 + 1
+            current_year = pd.Timestamp.now().year
+            df['movie_age'] = current_year - df['release_year']
         return df
 
-    def _create_popularity_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        C = df['vote_average'].mean()
-        m = df['vote_count'].quantile(0.75)
-
-        def weighted_rating(row):
-            v = row['vote_count']
-            R = row['vote_average']
-            return (v / (v + m) * R) + (m / (v + m) * C)
-
-        df['weighted_rating'] = df.apply(weighted_rating, axis=1)
-
-        df['norm_popularity'] = self.scaler.fit_transform(df[['popularity']])
-        df['norm_vote_count'] = self.scaler.fit_transform(df[['vote_count']])
-
+    def _add_genre_features(self, df):
+        if 'genres_parsed' in df.columns:
+            genres_matrix = self.mlb_genres.fit_transform(df['genres_parsed'])
+            genre_cols = [f"genre_{g}" for g in self.mlb_genres.classes_]
+            genres_df = pd.DataFrame(genres_matrix, columns=genre_cols, index=df.index)
+            df = pd.concat([df, genres_df], axis=1)
+            df['num_genres'] = df['genres_parsed'].apply(len)
         return df
 
-    def _create_advanced_metrics(self, df: pd.DataFrame) -> pd.DataFrame:
-        df['budget_efficiency'] = np.where(
-            df['budget'] > 0,
-            df['revenue'] / df['budget'],
-            0
-        )
+    def _add_text_features(self, df):
+        if 'overview' in df.columns:
+            overviews = df['overview'].fillna('').apply(self._clean_text)
+            tfidf_mat = self.tfidf.fit_transform(overviews)
+            svd = TruncatedSVD(n_components=20, random_state=42)
+            tfidf_reduced = svd.fit_transform(tfidf_mat)
+            for i in range(tfidf_reduced.shape[1]):
+                df[f'tfidf_{i}'] = tfidf_reduced[:, i]
+            df['overview_length'] = overviews.apply(len)
+        return df
 
-        df['genre_density'] = df['num_genres'] / len(self.mlb_genres.classes_)
+    def _add_popularity_features(self, df):
+        if 'vote_average' in df.columns and 'vote_count' in df.columns:
+            C = df['vote_average'].mean()
+            m = df['vote_count'].quantile(0.75)
 
-        df['success_score'] = (
-                df['weighted_rating'] * 0.4 +
-                df['norm_popularity'] * 0.3 +
-                df['roi'] * 0.3
-        )
+            def weighted_rating(row):
+                v = row['vote_count']
+                R = row['vote_average']
+                return (v / (v + m) * R) + (m / (v + m) * C)
 
+            df['weighted_rating'] = df.apply(weighted_rating, axis=1)
+        if 'popularity' in df.columns:
+            df['norm_popularity'] = self.scaler.fit_transform(df[['popularity']])
+        return df
+
+    def _add_advanced_features(self, df):
+        if 'budget' in df.columns and 'revenue' in df.columns:
+            df['budget_efficiency'] = np.where(df['budget'] > 0, df['revenue'] / df['budget'], 0)
+        if 'num_genres' in df.columns and 'genres_parsed' in df.columns:
+            total_genres = len(self.mlb_genres.classes_) if self.mlb_genres.classes_.size > 0 else 1
+            df['genre_density'] = df['num_genres'] / total_genres
         return df
 
     @staticmethod
-    def _clean_text(text: str) -> str:
+    def _clean_text(text):
         if not isinstance(text, str):
             return ""
         text = text.lower()
